@@ -139,6 +139,12 @@ class WiFiManager:
         except OSError:
             connected = False
             ap_active = False
+        rssi = None
+        if connected:
+            try:
+                rssi = self.sta.status('rssi')
+            except Exception:
+                rssi = None
         remaining = None
         if ap_active:
             elapsed = time.ticks_diff(time.ticks_ms(), self._last_ap_activity)
@@ -147,6 +153,7 @@ class WiFiManager:
             "state": "connected" if connected else self.state,
             "connected": connected, "ssid": self.ssid,
             "ip": self.sta.ifconfig()[0] if connected else None,
+            "rssi": rssi,
             "ap_active": ap_active,
             "ap_ssid": self.ap_ssid if ap_active else None,
             "ap_ip": self.ap.ifconfig()[0] if ap_active else None,

@@ -2,11 +2,18 @@
 
 网络线程只提交命令和读取快照，不直接访问 GPIO、PWM、数据库或 LVGL。
 """
+import os
 import time
 
 import _thread
 
 from lib.microdot import Microdot, send_file
+
+# 截图文件布局：主循环只负责写原始帧，本模块直接提供下载，不做像素转换。
+SHOT_DIR = "/screenshots"
+RAW_PATH = SHOT_DIR + "/latest.raw"
+REQUEST_FLAG = "/screenshot_request"
+DONE_FLAG = "/screenshot_done"
 
 
 def _web_root():
@@ -28,6 +35,7 @@ class WebServer:
         self.port = port
         self.app = Microdot()
         self.running = False
+        self._shot_lock = _thread.allocate_lock()
         self._register_routes()
 
     def start(self):
@@ -120,6 +128,10 @@ class WebServer:
                                   "password": body.get("password", ""),
                                   "auth": body.get("auth", "auto")})
 
+        @app.get("/api/screenshot")
+        def screenshot(request):
+            return self._screenshot(request)
+
         @app.errorhandler(Exception)
         def server_error(request, exc):
             print("Web request:", exc)
@@ -149,3 +161,63 @@ class WebServer:
             time.sleep_ms(20)
         return {"ok": True, "accepted": True, "id": command_id,
                 "message": "command queued"}, 202
+
+    # ---- 截图：主循环写原始帧到 /screenshots，本路由直接提供下载 ----
+    # 板上不做 BMP/PNG 转换：300KB 级像素运算会抢占主循环（实测 50Hz 跌到
+    # <10Hz），格式转换放在 PC 端（_board_backup/grab_web.py）。
+
+    def _screenshot(self, request):
+        self._ensure_shot_dir()
+        if (request.args or {}).get("cached"):
+            # 不重新截图，直接下载已有原始帧。
+            if not self._exists(RAW_PATH):
+                return {"ok": False, "message": "no cached screenshot"}, 404
+            return self._shot_response()
+        with self._shot_lock:
+            try:
+                os.remove(DONE_FLAG)
+            except OSError:
+                pass
+            with open(REQUEST_FLAG, "w") as handle:
+                handle.write("1")
+            deadline = time.ticks_add(time.ticks_ms(), 15000)
+            info = None
+            while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+                try:
+                    with open(DONE_FLAG) as handle:
+                        info = handle.read()
+                    break
+                except OSError:
+                    # 降频轮询，避免与主循环截图争抢文件系统/CPU。
+                    time.sleep_ms(400)
+            if info is None:
+                return {"ok": False, "message": "screenshot timeout"}, 504
+            try:
+                os.remove(DONE_FLAG)
+            except OSError:
+                pass
+            if info.startswith("ERR"):
+                return {"ok": False, "message": info}, 500
+        return self._shot_response()
+
+    @staticmethod
+    def _shot_response():
+        response = send_file(RAW_PATH, content_type="application/octet-stream",
+                             max_age=0)
+        response.headers["Content-Disposition"] = 'attachment; filename="aquarium.raw"'
+        return response
+
+    @staticmethod
+    def _exists(path):
+        try:
+            os.stat(path)
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _ensure_shot_dir():
+        try:
+            os.mkdir(SHOT_DIR)
+        except OSError:
+            pass

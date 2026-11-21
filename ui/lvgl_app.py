@@ -90,6 +90,8 @@ class LVGLApp:
         self.page_label = None
         self.top_label = None
         self.notice_label = None
+        self.page_indicator = None
+        self._dots_hide_at = 0
         self.home_labels = {}
         self.light_mode = None
         self.light_phase = None
@@ -309,6 +311,14 @@ class LVGLApp:
         if self._label_colors.get(key) != color:
             label.set_style_text_color(self._hex(color), 0)
             self._label_colors[key] = color
+
+    def _set_button_text(self, button, text):
+        key = id(button)
+        if self._btn_text.get(key) == text:
+            return
+        self._btn_text[key] = text
+        if button.get_child_count() > 0:
+            button.get_child(0).set_text(text)
 
     def _button(self, parent, text, callback, width=112, height=42,
                 filled=True, color=None):
@@ -556,27 +566,36 @@ class LVGLApp:
         self.page_label = self._label(top, self.PAGE_NAMES[0], color=self.C_INK,
                                       font=lv.font_song_16)
         self.page_label.set_pos(10, 5)
-        self.top_label = self._label(top, "--:--:--  WiFi:--", color=self.C_DIM,
+        # 居中时钟：日期 + 时间
+        self.top_label = self._label(top, "--/-- --:--:--", color=self.C_DIM,
                                      font=lv.font_montserrat_14)
-        self.top_label.set_pos(248, 7)
-        # 页指示点
-        self.page_dots = []
-        for i in range(6):
-            d = lv.obj(top)
-            d.set_size(8, 8)
-            d.set_pos(11 + i * 14, 22)
-            d.set_style_radius(4, 0)
-            d.set_style_border_width(0, 0)
-            d.set_style_bg_opa(lv.OPA.COVER, 0)
-            d.set_style_bg_color(self._hex(self.C_PRIMARY if i == 0 else self.C_MUTE), 0)
-            d.remove_flag(lv.obj.FLAG.SCROLLABLE)
-            self.page_dots.append(d)
+        self.top_label.align(lv.ALIGN.TOP_MID, 0, 7)
+        # 右侧：告警 + WiFi 融合图标（状态 / 信号强度与图标融合，无文字）
+        right = lv.obj(top)
+        right.set_size(160, 28)
+        right.set_style_bg_opa(lv.OPA.TRANSP, 0)
+        right.set_style_border_width(0, 0)
+        right.set_style_pad_all(0, 0)
+        right.set_style_pad_column(8, 0)
+        right.remove_flag(lv.obj.FLAG.SCROLLABLE)
+        right.set_flex_flow(lv.FLEX_FLOW.ROW)
+        right.set_flex_align(lv.FLEX_ALIGN.END, lv.FLEX_ALIGN.CENTER,
+                             lv.FLEX_ALIGN.CENTER)
+        right.align(lv.ALIGN.TOP_RIGHT, -10, 2)
+        self.alarm_label = self._label(right, "", color=self.C_DANGER,
+                                       font=lv.font_montserrat_14)
+        self.alarm_label.add_flag(lv.obj.FLAG.HIDDEN)
+        self._build_wifi_icon(right)
+        self._top_cache = {}
+        self._btn_text = {}
 
         self.tileview = lv.tileview(self.screen)
         self.tileview.set_size(self.WIDTH, 270)
         self.tileview.set_pos(0, 32)
         self.tileview.set_style_bg_color(self._hex(self.C_BG), 0)
         self.tileview.add_event_cb(self._tile_changed, lv.EVENT.VALUE_CHANGED, None)
+        self.tileview.add_event_cb(self._on_tile_scroll_begin, lv.EVENT.SCROLL_BEGIN, None)
+        self.tileview.add_event_cb(self._on_tile_scroll_end, lv.EVENT.SCROLL_END, None)
         for index in range(6):
             direction = 0
             if index < 5:
@@ -600,11 +619,6 @@ class LVGLApp:
         self._build_water(self.tiles[4])
         self._build_settings(self.tiles[5])
 
-        self.notice_label = self._label(
-            self.screen, "Swipe horizontally. Commands run in background.",
-            472, color=self.C_MUTE, font=lv.font_montserrat_14)
-        self.notice_label.set_pos(4, 304)
-
         self.keyboard = lv.keyboard(self.screen)
         self.keyboard.set_size(self.WIDTH, 160)
         self.keyboard.align(lv.ALIGN.BOTTOM_MID, 0, 0)
@@ -612,10 +626,80 @@ class LVGLApp:
         self.keyboard.add_event_cb(self._keyboard_done, lv.EVENT.READY, None)
         self.keyboard.add_event_cb(self._keyboard_done, lv.EVENT.CANCEL, None)
 
+        self._build_page_indicator()
+        self._hide_scrollbars(self.screen)
+        self._last_sb_hide = time.ticks_ms()
+
+    def _build_wifi_icon(self, parent):
+        box = lv.obj(parent)
+        box.set_size(24, 22)
+        box.set_style_bg_opa(lv.OPA.TRANSP, 0)
+        box.set_style_border_width(0, 0)
+        box.set_style_pad_all(0, 0)
+        box.remove_flag(lv.obj.FLAG.SCROLLABLE)
+        box.set_flex_flow(lv.FLEX_FLOW.ROW)
+        box.set_flex_align(lv.FLEX_ALIGN.END, lv.FLEX_ALIGN.CENTER,
+                           lv.FLEX_ALIGN.CENTER)
+        self.wifi_icon = self._label(box, lv.SYMBOL.WIFI, color=self.C_MUTE,
+                                     font=lv.font_montserrat_16)
+
+    def _hide_scrollbars(self, root):
+        """递归关闭整棵对象树的滚动条显示（保留可滚动性，仅隐藏条）。"""
+        if root is None:
+            return
+        try:
+            root.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
+        except Exception:
+            return
+        for i in range(root.get_child_count()):
+            self._hide_scrollbars(root.get_child(i))
+
     def _keyboard_done(self, event):
         self._mark_activity()
         self.keyboard.add_flag(lv.obj.FLAG.HIDDEN)
         self.keyboard.set_textarea(None)
+
+    def _build_page_indicator(self):
+        ind = lv.obj(self.screen)
+        ind.set_size(120, 18)
+        ind.set_pos(180, 302)
+        ind.set_style_bg_color(self._hex(self.C_INK), 0)
+        ind.set_style_bg_opa(200, 0)
+        ind.set_style_radius(9, 0)
+        ind.set_style_border_width(0, 0)
+        ind.set_style_pad_all(0, 0)
+        ind.remove_flag(lv.obj.FLAG.SCROLLABLE)
+        ind.add_flag(lv.obj.FLAG.HIDDEN)
+        ind.set_flex_flow(lv.FLEX_FLOW.ROW)
+        ind.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER,
+                           lv.FLEX_ALIGN.CENTER)
+        ind.set_style_pad_column(10, 0)
+        self.page_indicator = ind
+        self.page_dots = []
+        for i in range(6):
+            d = lv.obj(ind)
+            d.set_size(8, 8)
+            d.set_style_radius(4, 0)
+            d.set_style_border_width(0, 0)
+            d.set_style_bg_opa(lv.OPA.COVER, 0)
+            d.set_style_bg_color(
+                self._hex(self.C_WHITE if i == 0 else self.C_MUTE), 0)
+            d.remove_flag(lv.obj.FLAG.SCROLLABLE)
+            self.page_dots.append(d)
+
+    def _show_page_indicator(self):
+        if self.page_indicator is None:
+            return
+        self._refresh_dots()
+        self.page_indicator.remove_flag(lv.obj.FLAG.HIDDEN)
+        self._dots_hide_at = 0
+
+    def _on_tile_scroll_begin(self, event):
+        self._show_page_indicator()
+
+    def _on_tile_scroll_end(self, event):
+        self._refresh_dots()
+        self._dots_hide_at = time.ticks_add(time.ticks_ms(), 2000)
 
     def _refresh_dots(self):
         name = self.PAGE_NAMES[self.current_page]
@@ -623,7 +707,7 @@ class LVGLApp:
             self.page_label.set_text(name)
         for i, d in enumerate(self.page_dots):
             d.set_style_bg_color(
-                self._hex(self.C_PRIMARY if i == self.current_page else self.C_MUTE), 0)
+                self._hex(self.C_WHITE if i == self.current_page else self.C_MUTE), 0)
 
     def _tile_changed(self, event):
         active = self.tileview.get_tile_active()
@@ -690,13 +774,18 @@ class LVGLApp:
         ov["light_bars"] = []
         for i in range(4):
             ov["light_bars"].append(self._bar_meter(lbars, 150, 8, ch_colors[i], 0, 0, 100))
-        fc = self._card(row2, 164, 96)
-        fc.set_style_pad_all(9, 0)
-        fc.set_flex_align(lv.FLEX_ALIGN.SPACE_BETWEEN,
-                          lv.FLEX_ALIGN.START, lv.FLEX_ALIGN.START)
-        self._label(fc, "喂食", color=self.C_MUTE, font=lv.font_song_16)
-        self._button(fc, "立即喂食", self._show_feeding_confirm, 146, 54)
-        ov["feed_chip"] = self._chip(fc, "待机")
+        # 喂食区：去掉卡片与待机提示，只保留按钮（喂食中改文字并显示倒计时）
+        fbox = lv.obj(row2)
+        fbox.set_size(164, 96)
+        fbox.set_style_bg_opa(lv.OPA.TRANSP, 0)
+        fbox.set_style_border_width(0, 0)
+        fbox.set_style_pad_all(0, 0)
+        fbox.set_style_pad_row(4, 0)
+        fbox.remove_flag(lv.obj.FLAG.SCROLLABLE)
+        fbox.set_flex_flow(lv.FLEX_FLOW.COLUMN)
+        fbox.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER,
+                            lv.FLEX_ALIGN.CENTER)
+        self.feed_btn = self._button(fbox, "立即喂食", self._feed_button_tap, 146, 52)
         # 第三行：状态药丸（构建默认中文，刷新时覆盖为实时值）
         row3 = self._row(page, 30)
         chip_defaults = {"pump": "水泵 --", "air": "气泵 --",
@@ -974,6 +1063,14 @@ class LVGLApp:
         self._feeding_duration = raw
         self._submit({"type": "set_config", "values": {"feeding_duration": raw}})
 
+    def _feed_button_tap(self):
+        feeding = self._state.get("feeding", {}) if self._state else {}
+        if feeding.get("active"):
+            self._cancel_feeding()
+        else:
+            # 概览页立即喂食：不弹确认窗，直接开始
+            self._submit({"type": "start_feeding", "duration": self._feeding_duration})
+
     def _show_feeding_confirm(self):
         if self.keyboard is not None:
             self.keyboard.add_flag(lv.obj.FLAG.HIDDEN)
@@ -1004,6 +1101,7 @@ class LVGLApp:
         row.remove_flag(lv.obj.FLAG.SCROLLABLE)
         self._button(row, "取消", self._close_modal, 130)
         self._button(row, "确认", self._confirm_feeding, 130)
+        self._hide_scrollbars(modal)
 
     def _close_modal(self):
         if self._modal is not None:
@@ -1116,16 +1214,43 @@ class LVGLApp:
 
     def _refresh_top(self, state):
         clock = state.get("time", {})
-        wifi = state.get("wifi", {})
-        rtc = "RTC:OK" if clock.get("rtc_valid") else "RTC:--"
-        if wifi.get("connected"):
-            wifi_text = wifi.get("ip") or "online"
-        else:
-            wifi_text = wifi.get("state", "offline")
+        # 居中时钟：MM-DD HH:MM:SS（date 无效时 ----/--/-- 取后 5 位 -> --/--）
+        date = clock.get("date", "----/--/--")[-5:]
+        tm = clock.get("time", "--:--:--")
+        self.top_label.set_text("%s %s" % (date, tm))
+        self._refresh_wifi_icon(state.get("wifi", {}))
         alarms = state.get("alarms", [])
-        alarm_text = " AL:%d" % len(alarms) if alarms else ""
-        self.top_label.set_text("%s %s WiFi:%s%s" %
-                                (clock.get("time", "--:--:--"), rtc, wifi_text, alarm_text))
+        alarm_key = ("alarm", len(alarms))
+        if self._top_cache.get("alarm") != alarm_key:
+            self._top_cache["alarm"] = alarm_key
+            if alarms:
+                self.alarm_label.set_text("%s %d" % (lv.SYMBOL.BELL, len(alarms)))
+                self.alarm_label.remove_flag(lv.obj.FLAG.HIDDEN)
+            else:
+                self.alarm_label.add_flag(lv.obj.FLAG.HIDDEN)
+
+    def _refresh_wifi_icon(self, wifi):
+        connected = bool(wifi.get("connected"))
+        ap_active = bool(wifi.get("ap_active"))
+        rssi = wifi.get("rssi")
+        # 只保留一个 WiFi 图标，信号强度通过颜色梯度呈现：
+        # 强(绿) / 中(黄) / 弱(红) / AP(蓝) / 离线(灰)
+        if connected:
+            if rssi is None or rssi >= -65:
+                color = self.C_OK
+            elif rssi >= -75:
+                color = self.C_WARN
+            else:
+                color = self.C_DANGER
+        elif ap_active:
+            color = self.C_INFO
+        else:
+            color = self.C_MUTE
+        key = (connected, ap_active, rssi)
+        if self._top_cache.get("wifi") == key:
+            return
+        self._top_cache["wifi"] = key
+        self._set_label_color(self.wifi_icon, color)
 
     def _refresh_overview(self, state):
         ov = self.overview
@@ -1189,14 +1314,15 @@ class LVGLApp:
         self._set_chip(ov["chip_heater"], "加热 %s" % self._cn(self.MODE_LABELS, heater.get("mode")),
                        self.C_OK if heating else self.C_CARD_ALT,
                        self.C_WHITE if heating else self.C_DIM)
-        if feeding.get("active"):
+        feed_active = bool(feeding.get("active"))
+        if feed_active:
             rem = int(feeding.get("remaining", 0))
-            txt = "喂食 %02d:%02d" % (rem // 60, rem % 60)
-            self._set_chip(ov["chip_feed"], txt, self.C_WARN, self.C_WHITE)
-            self._set_chip(ov["feed_chip"], "喂食中", self.C_WARN, self.C_WHITE)
+            cd = "%02d:%02d" % (rem // 60, rem % 60)
+            self._set_button_text(self.feed_btn, "正在喂食")
+            self._set_chip(ov["chip_feed"], "喂食 %s" % cd, self.C_WARN, self.C_WHITE)
         else:
+            self._set_button_text(self.feed_btn, "立即喂食")
             self._set_chip(ov["chip_feed"], "喂食 待机", self.C_CARD_ALT, self.C_DIM)
-            self._set_chip(ov["feed_chip"], "待机", self.C_CARD_ALT, self.C_DIM)
         alarms = state.get("alarms", [])
         if alarms:
             self._set_chip(ov["chip_alarm"], "告警 %d" % len(alarms),
@@ -1437,7 +1563,7 @@ class LVGLApp:
         self._shot_active = False
         big = self._shot_buf
         self._shot_buf = None
-        big_nz = sum(1 for b in big if b)
+        # 不做全量像素统计：300KB 遍历会把截图时间推过 10s 看门狗窗口。
         try:
             with open(path, "wb") as handle:
                 handle.write(big)
@@ -1445,7 +1571,7 @@ class LVGLApp:
             pass
         try:
             with open("/screenshot_diag", "w") as h:
-                h.write("fc=%d big_nz=%d free=%d" % (fc, big_nz, gc.mem_free()))
+                h.write("fc=%d free=%d" % (fc, gc.mem_free()))
         except Exception:
             pass
         return len(big)
@@ -1459,6 +1585,16 @@ class LVGLApp:
         if _th > self._th_max:
             self._th_max = _th
         now = time.ticks_ms()
+        # 每秒兜底：覆盖运行时动态弹出的 dropdown 列表 / modal 等内部容器。
+        if time.ticks_diff(now, self._last_sb_hide) >= 1000:
+            self._last_sb_hide = now
+            self._hide_scrollbars(self.screen)
+        if (self.page_indicator is not None
+                and self._dots_hide_at
+                and not self.page_indicator.has_flag(lv.obj.FLAG.HIDDEN)
+                and time.ticks_diff(now, self._dots_hide_at) >= 0):
+            self.page_indicator.add_flag(lv.obj.FLAG.HIDDEN)
+            self._dots_hide_at = 0
         if time.ticks_diff(now, self._last_refresh) < self.REFRESH_MS:
             return
         self._last_refresh = now

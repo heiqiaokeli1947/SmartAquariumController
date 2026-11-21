@@ -55,6 +55,11 @@ def main():
         next_tick = now
         next_ctrl = now
         gc.collect()
+        # 截图输出目录：串口抓取与 Web 下载共用同一份原始帧。
+        try:
+            os.mkdir("/screenshots")
+        except OSError:
+            pass
         # --- 性能诊断：记录主循环各阶段最大耗时，每 5 秒打印 DIAG 行 ---
         _diag = {"ml": 0, "mt": 0, "mc": 0, "n": 0,
                  "at": time.ticks_add(time.ticks_ms(), 5000)}
@@ -81,8 +86,11 @@ def main():
                         else:
                             try:
                                 os.remove("/screenshot_request")
+                                if watchdog is not None:
+                                    # 截图期间主循环无法喂狗，先重置看门狗窗口。
+                                    watchdog.feed()
                                 try:
-                                    n = ui.take_screenshot("/screenshot.raw")
+                                    n = ui.take_screenshot("/screenshots/latest.raw")
                                     with open("/screenshot_done", "w") as h:
                                         h.write(str(n))
                                 except Exception as exc:
