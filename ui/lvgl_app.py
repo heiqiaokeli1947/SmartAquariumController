@@ -92,6 +92,10 @@ class LVGLApp:
         self.notice_label = None
         self.page_indicator = None
         self._dots_hide_at = 0
+        self.feed_btn = None
+        self._feed_btn_color = None
+        self._feed_blink_on = False
+        self._last_feed_blink = 0
         self.home_labels = {}
         self.light_mode = None
         self.light_phase = None
@@ -321,7 +325,7 @@ class LVGLApp:
             button.get_child(0).set_text(text)
 
     def _button(self, parent, text, callback, width=112, height=42,
-                filled=True, color=None):
+                filled=True, color=None, font=lv.font_song_16):
         button = lv.button(parent)
         button.set_size(width, height)
         c = color if color is not None else self.C_PRIMARY
@@ -334,7 +338,7 @@ class LVGLApp:
         button.set_style_bg_opa(lv.OPA.COVER, 0)
         button.set_style_radius(10, 0)
         button.set_style_border_width(0, 0)
-        label = self._label(button, text, color=label_color, font=lv.font_song_16)
+        label = self._label(button, text, color=label_color, font=font)
         label.center()
 
         def clicked(event, callback=callback):
@@ -590,7 +594,7 @@ class LVGLApp:
         self._btn_text = {}
 
         self.tileview = lv.tileview(self.screen)
-        self.tileview.set_size(self.WIDTH, 270)
+        self.tileview.set_size(self.WIDTH, 288)
         self.tileview.set_pos(0, 32)
         self.tileview.set_style_bg_color(self._hex(self.C_BG), 0)
         self.tileview.add_event_cb(self._tile_changed, lv.EVENT.VALUE_CHANGED, None)
@@ -735,6 +739,9 @@ class LVGLApp:
 
     def _build_overview(self, page):
         ov = {}
+        # tileview 已加高到屏幕底，首页内容均匀分布铺满，不留底部空带。
+        page.set_flex_align(lv.FLEX_ALIGN.SPACE_BETWEEN,
+                            lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
         # 第一行：四张指标卡
         row1 = self._row(page, 120)
         w = (468 - 4 - 3 * 6) // 4
@@ -785,7 +792,8 @@ class LVGLApp:
         fbox.set_flex_flow(lv.FLEX_FLOW.COLUMN)
         fbox.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER,
                             lv.FLEX_ALIGN.CENTER)
-        self.feed_btn = self._button(fbox, "立即喂食", self._feed_button_tap, 146, 52)
+        self.feed_btn = self._button(fbox, "立即喂食", self._feed_button_tap,
+                                     156, 84, font=lv.font_song_20)
         # 第三行：状态药丸（构建默认中文，刷新时覆盖为实时值）
         row3 = self._row(page, 30)
         chip_defaults = {"pump": "水泵 --", "air": "气泵 --",
@@ -1315,6 +1323,14 @@ class LVGLApp:
                        self.C_OK if heating else self.C_CARD_ALT,
                        self.C_WHITE if heating else self.C_DIM)
         feed_active = bool(feeding.get("active"))
+        btn_color = self.C_WARN if feed_active else self.C_PRIMARY
+        if self._feed_btn_color != btn_color:
+            self._feed_btn_color = btn_color
+            self.feed_btn.set_style_bg_color(self._hex(btn_color), 0)
+            if not feed_active:
+                # 退出喂食：恢复不透明，停止闪烁
+                self.feed_btn.set_style_bg_opa(lv.OPA.COVER, 0)
+                self._feed_blink_on = False
         if feed_active:
             rem = int(feeding.get("remaining", 0))
             cd = "%02d:%02d" % (rem // 60, rem % 60)
@@ -1595,6 +1611,14 @@ class LVGLApp:
                 and time.ticks_diff(now, self._dots_hide_at) >= 0):
             self.page_indicator.add_flag(lv.obj.FLAG.HIDDEN)
             self._dots_hide_at = 0
+        # 喂食中按钮每秒闪烁一次：每 500ms 切换背景透明度（亮/暗）。
+        if (self.feed_btn is not None and self._state is not None
+                and self._state.get("feeding", {}).get("active")):
+            if time.ticks_diff(now, self._last_feed_blink) >= 500:
+                self._last_feed_blink = now
+                self._feed_blink_on = not self._feed_blink_on
+                opa = lv.OPA.COVER if self._feed_blink_on else 90
+                self.feed_btn.set_style_bg_opa(opa, 0)
         if time.ticks_diff(now, self._last_refresh) < self.REFRESH_MS:
             return
         self._last_refresh = now
